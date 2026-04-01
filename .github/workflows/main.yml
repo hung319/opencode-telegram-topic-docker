@@ -1,0 +1,70 @@
+name: Auto Build Group Topics Bot
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set lowercase repository name
+        id: repo_name
+        run: echo "repo=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Get latest release from fork repo
+        id: get_version
+        run: |
+          # Thử lấy version từ Release mới nhất
+          LATEST_TAG=$(curl -s https://api.github.com/repos/shanekunz/opencode-telegram-group-topics-bot/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          
+          # Nếu kho này không dùng Github Release, chuyển sang lấy Tag mới nhất làm dự phòng
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG=$(curl -s https://api.github.com/repos/shanekunz/opencode-telegram-group-topics-bot/tags | grep '"name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          
+          echo "Bản mới nhất bên repo fork là: $LATEST_TAG"
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image already exists
+        id: check_build
+        run: |
+          # Chú ý: Image name được thêm hậu tố '-group' để tránh trùng lặp với bot cũ
+          if DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect ghcr.io/${{ steps.repo_name.outputs.repo }}-group:${{ steps.get_version.outputs.tag }} > /dev/null 2>&1; then
+            echo "✅ Version ${{ steps.get_version.outputs.tag }} đã được build. Bỏ qua..."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "🚀 Chưa có version ${{ steps.get_version.outputs.tag }}. Bắt đầu build..."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        if: steps.check_build.outputs.skip == 'false'
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        if: steps.check_build.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        if: steps.check_build.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ steps.repo_name.outputs.repo }}-group:latest
+            ghcr.io/${{ steps.repo_name.outputs.repo }}-group:${{ steps.get_version.outputs.tag }}
